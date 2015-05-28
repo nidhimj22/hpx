@@ -77,16 +77,26 @@ int test_function4(data_buffer<double> const& b)
 HPX_PLAIN_ACTION(test_function4, test_action4)
 
 ///////////////////////////////////////////////////////////////////////////////
+std::size_t
+get_size_type(hpx::parcelset::parcel const& outp, int out_archive_flags)
+{
+    // gather the required size for the archive
+    hpx::serialization::detail::size_gatherer_container gather_size;
+    hpx::serialization::output_archive archive(gather_size, out_archive_flags);
+    archive << outp;
+    return gather_size.size();
+}
+
 void test_parcel_serialization(hpx::parcelset::parcel outp,
-    int in_archive_flags, int out_archive_flags, bool zero_copy)
+    int out_archive_flags, bool zero_copy)
 {
     // serialize data
-    std::size_t arg_size = hpx::traits::get_type_size(outp, out_archive_flags);
+    std::size_t arg_size = get_size_type(outp, out_archive_flags);
     std::vector<char> out_buffer;
     std::vector<hpx::serialization::serialization_chunk> out_chunks;
     boost::uint32_t dest_locality_id = outp.get_destination_locality_id();
 
-    out_buffer.resize(arg_size + HPX_PARCEL_SERIALIZATION_OVERHEAD);
+    out_buffer.reserve(arg_size + HPX_PARCEL_SERIALIZATION_OVERHEAD);
 
     {
         // create an output archive and serialize the parcel
@@ -105,7 +115,7 @@ void test_parcel_serialization(hpx::parcelset::parcel outp,
     {
         // create an input archive and deserialize the parcel
         hpx::serialization::input_archive archive(
-            out_buffer, in_archive_flags, arg_size, &out_chunks);
+            out_buffer, arg_size, &out_chunks);
 
         archive >> inp;
     }
@@ -152,7 +162,6 @@ void test_normal_serialization(T& arg)
         reinterpret_cast<boost::uint64_t>(&test_function1));
 
     // compose archive flags
-    unsigned in_archive_flags = 0U;
     unsigned out_archive_flags = 0U;
 #ifdef BOOST_BIG_ENDIAN
     out_archive_flags |= hpx::serialization::endian_big;
@@ -169,7 +178,7 @@ void test_normal_serialization(T& arg)
     outp.set_parcel_id(hpx::parcelset::parcel::generate_unique_id());
     outp.set_source(here);
 
-    test_parcel_serialization(outp, in_archive_flags, out_archive_flags, false);
+    test_parcel_serialization(outp, out_archive_flags, false);
 }
 
 template <typename T1, typename T2>
@@ -181,7 +190,6 @@ void test_normal_serialization(T1& arg1, T2& arg2)
         reinterpret_cast<boost::uint64_t>(&test_function2));
 
     // compose archive flags
-    unsigned in_archive_flags = 0U;
     unsigned out_archive_flags = 0U;
 #ifdef BOOST_BIG_ENDIAN
     out_archive_flags |= hpx::serialization::endian_big;
@@ -198,7 +206,7 @@ void test_normal_serialization(T1& arg1, T2& arg2)
     outp.set_parcel_id(hpx::parcelset::parcel::generate_unique_id());
     outp.set_source(here);
 
-    test_parcel_serialization(outp, in_archive_flags, out_archive_flags, false);
+    test_parcel_serialization(outp, out_archive_flags, false);
 }
 
 template <typename T1, typename T2>
@@ -211,7 +219,6 @@ void test_normal_serialization(double d, T1& arg1, std::string const& s,
         reinterpret_cast<boost::uint64_t>(&test_function2));
 
     // compose archive flags
-    unsigned in_archive_flags = 0U;
     unsigned out_archive_flags = 0U;
 #ifdef BOOST_BIG_ENDIAN
     out_archive_flags |= hpx::serialization::endian_big;
@@ -228,7 +235,7 @@ void test_normal_serialization(double d, T1& arg1, std::string const& s,
     outp.set_parcel_id(hpx::parcelset::parcel::generate_unique_id());
     outp.set_source(here);
 
-    test_parcel_serialization(outp, in_archive_flags, out_archive_flags, false);
+    test_parcel_serialization(outp, out_archive_flags, false);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -241,7 +248,6 @@ void test_zero_copy_serialization(T& arg)
         reinterpret_cast<boost::uint64_t>(&test_function1));
 
     // compose archive flags
-    unsigned in_archive_flags = 0U;
     unsigned out_archive_flags = 0U;
 #ifdef BOOST_BIG_ENDIAN
     out_archive_flags |= hpx::serialization::endian_big;
@@ -258,7 +264,7 @@ void test_zero_copy_serialization(T& arg)
     outp.set_parcel_id(hpx::parcelset::parcel::generate_unique_id());
     outp.set_source(here);
 
-    test_parcel_serialization(outp, in_archive_flags, out_archive_flags, true);
+    test_parcel_serialization(outp, out_archive_flags, true);
 }
 
 template <typename T1, typename T2>
@@ -270,7 +276,6 @@ void test_zero_copy_serialization(T1& arg1, T2& arg2)
         reinterpret_cast<boost::uint64_t>(&test_function2));
 
     // compose archive flags
-    unsigned in_archive_flags = 0U;
     unsigned out_archive_flags = 0U;
 #ifdef BOOST_BIG_ENDIAN
     out_archive_flags |= hpx::serialization::endian_big;
@@ -287,7 +292,7 @@ void test_zero_copy_serialization(T1& arg1, T2& arg2)
     outp.set_parcel_id(hpx::parcelset::parcel::generate_unique_id());
     outp.set_source(here);
 
-    test_parcel_serialization(outp, in_archive_flags, out_archive_flags, true);
+    test_parcel_serialization(outp, out_archive_flags, true);
 }
 
 template <typename T1, typename T2>
@@ -300,7 +305,6 @@ void test_zero_copy_serialization(double d, T1& arg1, std::string const& s,
         reinterpret_cast<boost::uint64_t>(&test_function2));
 
     // compose archive flags
-    unsigned in_archive_flags = 0U;
     unsigned out_archive_flags = 0U;
 #ifdef BOOST_BIG_ENDIAN
     out_archive_flags |= hpx::serialization::endian_big;
@@ -317,7 +321,7 @@ void test_zero_copy_serialization(double d, T1& arg1, std::string const& s,
     outp.set_parcel_id(hpx::parcelset::parcel::generate_unique_id());
     outp.set_source(here);
 
-    test_parcel_serialization(outp, in_archive_flags, out_archive_flags, true);
+    test_parcel_serialization(outp, out_archive_flags, true);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

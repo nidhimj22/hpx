@@ -17,8 +17,10 @@
 #include <hpx/util/deferred_call.hpp>
 #include <hpx/util/move.hpp>
 #include <hpx/traits/is_callable.hpp>
+#include <hpx/traits/is_executor.hpp>
 
 #include <boost/mpl/identity.hpp>
+#include <boost/mpl/if.hpp>
 #include <boost/utility/enable_if.hpp>
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -41,6 +43,25 @@ namespace hpx
         sched.add(
             util::deferred_call(std::forward<F>(f), std::forward<Ts>(vs)...),
             "hpx::apply");
+        return false;
+    }
+
+    template <typename Executor, typename F, typename ...Ts>
+    typename boost::enable_if_c<
+        boost::mpl::if_c<
+            traits::is_executor<Executor>::value
+          , traits::detail::is_callable_not_action<
+                typename util::decay<F>::type(typename util::decay<Ts>::type...)
+            >
+          , boost::mpl::false_
+        >::type::value
+     && !traits::is_bound_action<typename util::decay<F>::type>::value
+      , bool
+    >::type
+    apply(Executor& exec, F&& f, Ts&&... vs)
+    {
+        parallel::executor_traits<Executor>::apply_execute(exec,
+            util::deferred_call(std::forward<F>(f), std::forward<Ts>(vs)...));
         return false;
     }
 

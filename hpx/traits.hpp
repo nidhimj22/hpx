@@ -98,9 +98,6 @@ namespace hpx { namespace traits
 
     ///////////////////////////////////////////////////////////////////////////
     // Customization point for type_size
-    template <typename T, typename Enable = void>
-    struct type_size;
-
     template <typename A, typename Enable = void>
     struct is_chunk_allocator;
 
@@ -152,6 +149,9 @@ namespace hpx { namespace traits
     ///////////////////////////////////////////////////////////////////////////
     template <typename T, typename Enable = void>
     struct is_distribution_policy;
+
+    template <typename T, typename Enable = void>
+    struct is_executor;
 }}
 
 #endif

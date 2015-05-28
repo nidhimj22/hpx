@@ -127,6 +127,13 @@ namespace hpx { namespace traits {
 /// to avoid defining the action_type in global namespace. Normally, the use of
 /// the macro \a HPX_PLAIN_ACTION is recommend.
 ///
+/// \note The macro \a HPX_DEFINE_PLAIN_ACTION can be used with 1 or 2
+/// arguments. The second argument is optional. The default value for the
+/// second argument (the typename of the defined action) is derived from the
+/// name of the function (as passed as the first argument) by appending '_action'.
+/// The second argument can be omitted only if the first argument with an
+/// appended suffix '_action' resolves to a valid, unqualified C++ type name.
+///
 #define HPX_DEFINE_PLAIN_ACTION(...)                                          \
     HPX_DEFINE_PLAIN_ACTION_(__VA_ARGS__)                                     \
     /**/
@@ -150,7 +157,7 @@ namespace hpx { namespace traits {
     /**/
 
 #define HPX_DEFINE_PLAIN_ACTION_1(func)                                       \
-    HPX_DEFINE_PLAIN_ACTION_2(func, name)                                     \
+    HPX_DEFINE_PLAIN_ACTION_2(func, BOOST_PP_CAT(func, _action))              \
     /**/
 
 #define HPX_DEFINE_PLAIN_ACTION_2(func, name)                                 \
@@ -159,7 +166,7 @@ namespace hpx { namespace traits {
     /**/
 
 #define HPX_DEFINE_PLAIN_DIRECT_ACTION_1(func)                                \
-    HPX_DEFINE_PLAIN_DIRECT_ACTION_2(func, name)                              \
+    HPX_DEFINE_PLAIN_DIRECT_ACTION_2(func, BOOST_PP_CAT(func, _action))       \
     /**/
 
 #define HPX_DEFINE_PLAIN_DIRECT_ACTION_2(func, name)                          \
