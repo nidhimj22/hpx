@@ -87,6 +87,9 @@ namespace hpx { namespace threads
             return available;
         }
 
+        // reserve cores at higher use counts(use count>0)
+        // used when cores cannot be allocated by stealing
+        // calls reserve_processing_units
         std::size_t resource_manager::reserve_at_higher_use_count(
                 std::size_t desired,
                 std::vector<BOOST_SCOPED_ENUM(punit_status)>& available_punits)
@@ -110,7 +113,6 @@ namespace hpx { namespace threads
         // proxy remembers the core as temporarily released
         // release_cores_to_min - scheduler should release all cores above its minimum
         // release_borrowed_cores - scheduler should release all its borrowed cores
-
         bool resource_manager::release_scheduler_resources(std::map<std::size_t, static_allocation_data>::iterator it, 
                 std::size_t number_to_free, std::vector<BOOST_SCOPED_ENUM(punit_status)>& available_punits)
         {
@@ -131,7 +133,9 @@ namespace hpx { namespace threads
 
             else if (number_to_free == release_cores_to_min)
             {
-                number_to_free = st.num_owned_cores - st.min_proxy_cores;
+                // number_to_free includes all 
+                number_to_free = st.num_owned_cores - st.min_proxy_cores - 
+                    (st.num_cores_stolen - st.num_borrowed_cores);
                 borrowed_cores = 0;
             }
 
@@ -140,18 +144,20 @@ namespace hpx { namespace threads
                 borrowed_cores = 0;
             }
 
-            owned_cores = number_to_free - borrowed_cores;
+            owned_cores = number_to_free - borrowed_cores; // owned_cores number of cores can be released only
 
             if (number_to_free > 0)
             {
                 for (coreids_type coreids : p.core_ids_) {
+                    // check all cores
                     if (punits_[coreids.first].use_count_ > 0 || owned_cores > 0)
                     {
                         // The proxy remembers this processor as gone ..
                         // TODO
 
-                        --punits_[coreids.first].use_count_;
-                        
+                        ++(*it).second.num_cores_stolen; // increase number of stolen cores
+                        --punits_[coreids.first].use_count_; // reduce use_count as core is released
+
                         if (punits_[coreids.first].use_count_ > 0)
                         {
                             --owned_cores;
@@ -178,13 +184,19 @@ namespace hpx { namespace threads
         std::size_t resource_manager::release_cores_on_existing_scedulers(std::size_t number_to_free,
                 std::vector<BOOST_SCOPED_ENUM(punit_status)>& available_punits)
         {
-            // Ask previously allocated schedulers to release surplus cores, until either the request is satisfied, or we're out of schedulers.
+            // Ask previously allocated schedulers to release surplus cores, 
+            // until either the request is satisfied, or we're out of schedulers.
             bool released_cores = false;
 
             std::map<std::size_t, static_allocation_data>::iterator it;
+            std::map<std::size_t, static_allocation_data>::iterator iter;          
+            iter = proxies_static_allocation_data.end();
+            iter--;
 
-            for (it = proxies_static_allocation_data.begin();it!=proxies_static_allocation_data.end();it++)
+
+            for (it = proxies_static_allocation_data.begin();it!=iter;it++)
             {
+                // check each scheduler
                 if (release_scheduler_resources(it, number_to_free, available_punits))
                 {
                     released_cores = true;
@@ -197,6 +209,7 @@ namespace hpx { namespace threads
             if (released_cores)
             {
                 available = reserve_processing_units(0, number_to_free, available_punits);
+                // reserve resources if available
             }
             else
             {
@@ -209,8 +222,8 @@ namespace hpx { namespace threads
         // Tries to redistribute cores allocated to all schedulers proportional 
         // to each schedulers maximum punits 
         // and reserve any freed cores for the new scheduler.
-        std::size_t resource_manager::redistribute_cores_among_all(std::size_t reserved, std::size_t min_punits, std::size_t max_punits,
-                std::vector<BOOST_SCOPED_ENUM(punit_status)>& available_punits)
+        std::size_t resource_manager::redistribute_cores_among_all(std::size_t reserved, std::size_t min_punits,
+                std::size_t max_punits, std::vector<BOOST_SCOPED_ENUM(punit_status)>& available_punits)
         {
 
             std::size_t available = 0;
@@ -220,14 +233,20 @@ namespace hpx { namespace threads
             if (proxies_static_allocation_data.size() > 1)
             {
                 std::size_t total_minimum = min_punits;
-                std::size_t total_allocated = reserved; // sum of cores that have been previously reserved and cores that were reserved during this allocation attempt.
+                std::size_t total_allocated = reserved;
+                // have been previously reserved and cores that were reserved during this allocation attempt.
+                
                 std::size_t num_schedulers = 1; // includes the current scheduler
 
-                // total_allocated isnumber of cores allocated to new scheduler so far plus 
+                // total_allocated is number of cores allocated to new scheduler so far plus 
                 // the number of 'owned' cores allocated to all existing schedulers.
 
                 std::map<std::size_t, static_allocation_data>::iterator it;
-                for (it == proxies_static_allocation_data.begin();it!=proxies_static_allocation_data.end();it++)
+                std::map<std::size_t, static_allocation_data>::iterator iter;          
+                iter = proxies_static_allocation_data.end();
+                iter--;
+
+                for (it == proxies_static_allocation_data.begin();it!=iter;it++)
                 {
 
                     static_allocation_data st = (*it).second;
@@ -244,36 +263,31 @@ namespace hpx { namespace threads
                 {
                     // We have found schedulers with cores greater than min. Moreover, the sum of all cores already allocated to
                     // existing schedulers can at least satisfy all mins (including the min requirement of the current scheduler).
-                    std::size_t cookie = next_cookie_ + 1;
 
                     double total_desired = 0.0;
                     double scaling = 0.0;
+                    std::map<std::size_t, static_allocation_data> scaled_static_allocation_data;
 
-                    std::map<std::size_t, static_allocation_data> scaled_static_allocation_data;	
-
-                    static_allocation_data st;
-                    st.min_proxy_cores = min_punits;
-                    st.max_proxy_cores = max_punits;	
-                    st.adjusted_desired = max_punits;
-
-                    total_desired += st.adjusted_desired;
-
-                    scaled_static_allocation_data.insert(std::map<std::size_t, static_allocation_data>::value_type(cookie , st)); 
+                    std::map<std::size_t, static_allocation_data>::iterator iter;          
+                    iter = proxies_static_allocation_data.end();
+                    iter--;
 
                     for (it = proxies_static_allocation_data.begin();it!=proxies_static_allocation_data.end();it++)
                     {
-                        st = (*it).second;
-                        if (st.num_owned_cores > st.min_proxy_cores)
+                        static_allocation_data st = (*it).second;
+                        if (st.num_owned_cores > st.min_proxy_cores || it==iter)
                         {
                             st.adjusted_desired = st.max_proxy_cores;
-                            scaled_static_allocation_data.insert(std::map<std::size_t, static_allocation_data>::value_type((*it).first , st));
+                            scaled_static_allocation_data.insert(std::map<std::size_t,
+                                    static_allocation_data>::value_type((*it).first , st));
+
                             total_desired += st.adjusted_desired;
                         }
                     }
 
                     while (true)
                     {
-                        scaling = total_allocated/total_desired;
+                        scaling = total_allocated/total_desired; // scaling factor 
 
                         for (it = scaled_static_allocation_data.begin();it!=scaled_static_allocation_data.end();it++)
                         {
@@ -296,7 +310,8 @@ namespace hpx { namespace threads
                             {
                                 double modifier = st.num_owned_cores/st.allocation;
 
-                                // Reduce adjusted_desired by multiplying it with 'modifier', to try to bias allocation to the original size or less.
+                                // Reduce adjusted_desired by multiplying it with 'modifier', 
+                                // to try to bias allocation to the original size or less.
                                 total_desired -= st.adjusted_desired * (1.0 - modifier);
                                 st.adjusted_desired = modifier * st.adjusted_desired;
 
@@ -318,7 +333,8 @@ namespace hpx { namespace threads
                             {
                                 double modifier = st.min_proxy_cores/st.allocation;
 
-                                // Reduce adjustedDesired by multiplying with it 'modifier', to try to bias allocation to desired or less.
+                                // Reduce adjustedDesired by multiplying with it 'modifier', 
+                                // to try to bias allocation to desired or less.
                                 total_desired -= st.adjusted_desired * (1.0 - modifier);
                                 st.adjusted_desired = modifier*st.adjusted_desired;
                                 re_calculate = true;
@@ -356,7 +372,7 @@ namespace hpx { namespace threads
 
                     it = scaled_static_allocation_data.end();
                     it--;
-                    st = (*it).second;
+                    static_allocation_data st = (*it).second;
 
                     if (st.allocation > total_allocated)
                     {
@@ -395,13 +411,17 @@ namespace hpx { namespace threads
         ///     totalAllocated is the sum of all AllocationData[*].m_scaledAllocation upon entry, which after the function call is over will
         ///     necessarily be equal to the sum of all AllocationData[*].m_allocation.
         /// </summary>
-        void resource_manager::roundup_scaled_allocations(std::map<std::size_t, static_allocation_data> &scaled_static_allocation_data , std::size_t total_allocated)
+        void resource_manager::roundup_scaled_allocations(std::map<std::size_t, 
+            static_allocation_data> &scaled_static_allocation_data , std::size_t total_allocated)
         {
 
         }
 
-
-        void resource_manager::preprocess_static_allocation()
+        
+        // store all information required for static allocation in
+        // proxies_static_allocation_data
+        // also store new proxy scheduler
+        void resource_manager::preprocess_static_allocation(std::size_t min_punits, std::size_t max_punits)
         {
             proxies_map_type::iterator it;
             proxies_static_allocation_data.clear();
@@ -435,6 +455,13 @@ namespace hpx { namespace threads
                 proxies_static_allocation_data.insert(std::map<std::size_t, 
                         static_allocation_data>::value_type((*it).first , st));
             }
+            std::size_t cookie = next_cookie_ + 1;
+            static_allocation_data st;
+            st.min_proxy_cores = min_punits;
+            st.max_proxy_cores = max_punits;	
+            st.adjusted_desired = max_punits;
+            st.num_cores_stolen = 0;
+            proxies_static_allocation_data.insert(std::map<std::size_t, static_allocation_data>::value_type(cookie , st)); 
 
         }
 
@@ -445,7 +472,7 @@ namespace hpx { namespace threads
                     std::size_t max_punits, error_code& ec)
             {
                 std::vector<coreids_type> core_ids;
-               
+
                 // array of available processing units
                 std::vector<BOOST_SCOPED_ENUM(punit_status)> available_punits(
                         get_os_thread_count(), punit_status::unassigned);
@@ -458,7 +485,7 @@ namespace hpx { namespace threads
                     // insufficient available cores found, try to share 
                     // processing units
 
-                    preprocess_static_allocation();
+                    preprocess_static_allocation(min_punits, max_punits);
 
                     reserved+=release_cores_on_existing_scedulers(release_borrowed_cores, available_punits);
 
@@ -491,7 +518,7 @@ namespace hpx { namespace threads
 
                         // update use count for reserved processing units
                         ++punits_[i].use_count_;
-						
+
                     }
 
                 }
@@ -504,7 +531,7 @@ namespace hpx { namespace threads
                         proxy->remove_processing_unit(j, ec);
                         --punits_[j].use_count_;
                     }
-                    
+
                     return std::vector<coreids_type>();
 
                 }
