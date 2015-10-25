@@ -104,7 +104,7 @@ namespace hpx { namespace threads
             {
                 dynamic_allocation_data dt = (*it).second;
                 // For all priorities, get the schedulers that we can take cores away from.
-                if (dt->GetNumAllocatedCores() > dt.m_suggestedAllocation)
+                if (dt.current_allocation > dt.suggested_allocation)
                 {
                     // Borrowed cores can be migrated as well. Clearly if the owning scheduler was using the borrowed core, the scheduler
                     // would not still have it. Therefore, the owning scheduler is idle on the core, and if a borrowed core is migrated
@@ -147,7 +147,6 @@ namespace hpx { namespace threads
 
                 }
             }
-
 
             else if (pGlobalCore->m_useCount == pGlobalCore->m_idleSchedulers)
             {
@@ -285,7 +284,7 @@ namespace hpx { namespace threads
                             {
                                 // We're holding the lock, and the state is Standby. There should be only one
                                 // scheduler the RM knows about at this time.
-                                if (DistributeCoresToSurvivingScheduler())
+                                if (distribute_cores_to_surviving())
                                 {
                                     timeout = INFINITE;
                                 }
@@ -306,10 +305,10 @@ namespace hpx { namespace threads
                             {
                                 if (retval == )
                                 {
-                                    DoCoreMigration();
-                                    if (SchedulersNeedNotifications())
+                                    do_core_migration();
+                                    if (schedulers_need_notification())
                                     {
-                                        SendResourceNotifications();
+                                        send_resource_notifications();
                                     }
 
                                     old_tick_count = get_tick_count();
@@ -370,86 +369,37 @@ namespace hpx { namespace threads
         ///     one scheduler with external subscribed threads that it removes -> there is a chance that this move may allow us to allocate
         ///     more vprocs.
         /// </summary>
-        bool ResourceManager::DistributeCoresToSurvivingScheduler()
+        bool resource_manager::distribute_cores_to_surviving()
         {
             // NOTE: This routine must be called while m_lock is held.
 
-            if (!m_schedulers.Empty())
+            if (!proxies_.empty())
             {
-                SchedulerProxy * pSchedulerProxy = m_schedulers.First();
-
+                proxy_data& p = proxies_.begin()->second;
+                boost::shared_ptr<detail::manage_executor> proxy = p.proxy_;
+              
                 // Since this is the only scheduler in the RM, we should able to satisfy its MaxConcurrency.
+                std::size_t max_proxy_cores = proxy->get_policy_element(detail::max_concurrency, ec1);
                 if (pSchedulerProxy->GetNumAllocatedCores() < pSchedulerProxy->DesiredHWThreads() ||
                         pSchedulerProxy->GetNumBorrowedCores() > 0)
                 {
-                    unsigned int suggestedAllocation = pSchedulerProxy->AdjustAllocationIncrease(pSchedulerProxy->DesiredHWThreads());
-                    unsigned int remainingCores = suggestedAllocation - pSchedulerProxy->GetNumAllocatedCores();
-                    SchedulerNode * pAllocatedNodes = pSchedulerProxy->GetAllocatedNodes();
-                    unsigned int * pSortedNodeOrder = pSchedulerProxy->GetSortedNodeOrder();
-
-                    // Sort the array of nodes in the proxy by number of allocated cores, largest first, if we're allocating
-                    // to it less cores than the total available. This is so that we pack nodes as tightly as possible.
-                    bool sortNodes = pSchedulerProxy->DesiredHWThreads() != m_coreCount;
-
-                    for (unsigned int i = 0; i < m_nodeCount; ++i)
+                    for (std::size_t i = 0; i != punits_.size(); ++i)
                     {
-                        // No need to sort nodes the next time around, if there are no more cores to add.
-                        sortNodes &= remainingCores > 0;
-
-                        if (sortNodes)
+                        if (available_punits[i] == punit_status::unassigned)
                         {
-                            unsigned int maxAllocationIndex = i;
-                            SchedulerNode *pMaxNode = &pAllocatedNodes[pSortedNodeOrder[maxAllocationIndex]];
-
-                            for (unsigned int j = i + 1; j < m_nodeCount; ++j)
-                            {
-                                SchedulerNode * pNode = &pAllocatedNodes[pSortedNodeOrder[j]];
-                                if (pNode->m_allocatedCores > pMaxNode->m_allocatedCores)
-                                {
-                                    maxAllocationIndex = j;
-                                    pMaxNode = pNode;
-                                }
-                            }
-
-                            if (i != maxAllocationIndex)
-                            {
-                                // Swap the index at 'maxAllocationIndex' with the index at 'i'. The next iteration will traverse nodes starting at
-                                // m_pSortedNodeOrder[i + i].
-                                unsigned int tempIndex = pSortedNodeOrder[i];
-                                pSortedNodeOrder[i] = pSortedNodeOrder[maxAllocationIndex];
-                                pSortedNodeOrder[maxAllocationIndex] = tempIndex;
-                            }
+                                ++punits_[i].use_count_;
+                                pSchedulerProxy->AddCore(pCurrentNode, coreIndex, false);
+                                available_punits[i] = punit_status::assigned;
                         }
-
-                        // Assign cores until the desired number of cores is reached. In addition, check if there are
-                        // any borrowed cores and switch them to owned.
-                        SchedulerNode * pCurrentNode = &pAllocatedNodes[pSortedNodeOrder[i]];
-                        for (unsigned int coreIndex = 0; coreIndex < pCurrentNode->m_coreCount; ++coreIndex)
+                        else
                         {
-                            SchedulerCore * pCore = &pCurrentNode->m_pCores[coreIndex];
-                            if (pCore->m_coreState == ProcessorCore::Unassigned)
+                            if (pCore->IsBorrowed())
                             {
-                                if (remainingCores > 0)
-                                {
-                                    ASSERT(*pCore->m_pGlobalUseCountPtr == 0);
-
-                                    ++(*pCore->m_pGlobalUseCountPtr);
-
-                                    pSchedulerProxy->AddCore(pCurrentNode, coreIndex, false);
-                                    --remainingCores;
-                                }
-                            }
-                            else
-                            {
-                                if (pCore->IsBorrowed())
-                                {
-                                    pSchedulerProxy->ToggleBorrowedState(pCurrentNode, coreIndex);
-                                }
+                                pSchedulerProxy->ToggleBorrowedState(pCurrentNode, coreIndex);
                             }
                         }
                     }
-                }
-
+              
                 if (pSchedulerProxy->ShouldReceiveNotifications())
                 {
                     SendResourceNotifications();
@@ -580,7 +530,7 @@ namespace hpx { namespace threads
 
             std::map<std::size_t, static_allocation_data>::iterator it;
 
-            for (it = proxies_static_allocation_data.begin();it!=proxies_static_allocation_data.end();it++)
+            for (it = static_allocation_data.begin();it!=static_allocation_data.end();it++)
             {
                 if (release_scheduler_resources(it, number_to_free, available_punits))
                 {
@@ -614,7 +564,7 @@ namespace hpx { namespace threads
 
             // Try to proportionally allocate cores to all schedulers w/o oversubscription. The proportions used will be
             // max_punits for each scheduler, except that no existing scheduler will be forced to increase the current allocation.
-            if (proxies_static_allocation_data.size() > 1)
+            if (static_allocation_data.size() > 1)
             {
                 std::size_t total_minimum = min_punits;
                 std::size_t total_allocated = reserved; // sum of cores that have been previously reserved and cores that were reserved during this allocation attempt.
@@ -624,7 +574,7 @@ namespace hpx { namespace threads
                 // the number of 'owned' cores allocated to all existing schedulers.
 
                 std::map<std::size_t, static_allocation_data>::iterator it;
-                for (it == proxies_static_allocation_data.begin();it!=proxies_static_allocation_data.end();it++)
+                for (it == static_allocation_data.begin();it!=static_allocation_data.end();it++)
                 {
 
                     static_allocation_data st = (*it).second;
@@ -655,4 +605,382 @@ namespace hpx { namespace threads
 
                     total_desired += st.adjusted_desired;
 
-                    scaled_static_allocation_data.insert(std::map<std::size_t, static_allocation_data>::value_type(cookie , st)
+                    scaled_static_allocation_data.insert(std::map<std::size_t, static_allocation_data>::value_type(cookie , st)); 
+
+                    for (it = static_allocation_data.begin();it!=static_allocation_data.end();it++)
+                    {
+                        st = (*it).second;
+                        if (st.num_owned_cores > st.min_proxy_cores)
+                        {
+                            st.adjusted_desired = st.max_proxy_cores;
+                            scaled_static_allocation_data.insert(std::map<std::size_t, static_allocation_data>::value_type((*it).first , st));
+                            total_desired += st.adjusted_desired;
+                        }
+                    }
+
+                    while (true)
+                    {
+                        scaling = total_allocated/total_desired;
+
+                        for (it = scaled_static_allocation_data.begin();it!=scaled_static_allocation_data.end();it++)
+                        {
+                            static_allocation_data st = (*it).second;
+                            st.scaled_allocation = st.adjusted_desired * scaling ;
+                        }
+
+                        roundup_scaled_allocations(scaled_static_allocation_data, total_allocated);
+
+                        bool re_calculate = false;
+                        std::map<std::size_t, static_allocation_data>::iterator iter;          
+                        iter = scaled_static_allocation_data.end();
+                        iter--;
+
+                        for (it = scaled_static_allocation_data.begin();it!=iter;it++)
+                        {
+                            static_allocation_data st = (*it).second;
+
+                            if (st.allocation > st.num_owned_cores)
+                            {
+                                double modifier = st.num_owned_cores/st.allocation;
+
+                                // Reduce adjusted_desired by multiplying it with 'modifier', to try to bias allocation to the original size or less.
+                                total_desired -= st.adjusted_desired * (1.0 - modifier);
+                                st.adjusted_desired = modifier * st.adjusted_desired;
+
+                                re_calculate = true;
+                            }
+                        }
+
+                        if (re_calculate)
+                        {
+                            continue;
+                        }
+
+                        for (it = scaled_static_allocation_data.begin();it!=scaled_static_allocation_data.end();it++)
+                        {
+                            // Keep recursing until all allocations are no greater than desired (including the current scheduler).
+                            static_allocation_data st = (*it).second;
+
+                            if (st.allocation > st.min_proxy_cores)
+                            {
+                                double modifier = st.min_proxy_cores/st.allocation;
+
+                                // Reduce adjustedDesired by multiplying with it 'modifier', to try to bias allocation to desired or less.
+                                total_desired -= st.adjusted_desired * (1.0 - modifier);
+                                st.adjusted_desired = modifier*st.adjusted_desired;
+                                re_calculate = true;
+                            }
+                        }
+
+                        if (re_calculate)
+                        {
+                            continue;
+                        }
+
+                        for (it = scaled_static_allocation_data.begin();it!=scaled_static_allocation_data.end();it++)
+                        {
+                            // Keep recursing until all allocations are at least minimum (including the current scheduler).
+                            static_allocation_data st = (*it).second;
+
+                            if (st.min_proxy_cores > st.allocation)
+                            {
+                                double new_desired = st.min_proxy_cores/scaling;
+
+                                // Bias desired to get allocation closer to min.
+                                total_desired += new_desired - st.adjusted_desired;
+                                st.adjusted_desired = new_desired;
+
+                                re_calculate = true;
+                            }
+                        }
+
+                        if (re_calculate)
+                        {
+                            continue;
+                        }
+                        break;
+                    } // end of while(true)
+
+                    it = scaled_static_allocation_data.end();
+                    it--;
+                    st = (*it).second;
+
+                    if (st.allocation > total_allocated)
+                    {
+                        std::map<std::size_t, static_allocation_data>::iterator iter;          
+                        iter = scaled_static_allocation_data.end();
+                        iter--;
+
+                        for (it = scaled_static_allocation_data.begin();it!=iter;it++)
+                        {
+
+                            static_allocation_data st = (*it).second;
+
+                            std::size_t reduce_by = st.num_owned_cores - st.allocation;
+                            if (reduce_by > 0)
+                            {
+                                release_scheduler_resources(it, reduce_by, available_punits);
+                            }
+                        }
+
+                        // Reserve out of the cores we just freed.
+                        available = reserve_processing_units(0,st.allocation - reserved,available_punits);
+                    }
+
+                    scaled_static_allocation_data.clear();
+                }
+            }
+            return available;
+        }
+
+        /// <summary>
+        ///     Denote the doubles in the input array AllocationData[*].m_scaledAllocation by: r[1],..., r[n].
+        ///     Split r[j] into b[j] and fract[j] where b[j] is the integral floor of r[j] and fract[j] is the fraction truncated.
+        ///     Sort the set { r[j] | j = 1,...,n } from largest fract[j] to smallest.
+        ///     For each j = 0, 1, 2,...  if fract[j] > 0, then set b[j] += 1 and pay for the cost of 1-fract[j] by rounding
+        ///     fract[j0] -> 0 from the end (j0 = n-1, n-2,...) -- stop before j > j0. b[j] is stored in AllocationData[*].m_allocation.
+        ///     totalAllocated is the sum of all AllocationData[*].m_scaledAllocation upon entry, which after the function call is over will
+        ///     necessarily be equal to the sum of all AllocationData[*].m_allocation.
+        /// </summary>
+        void resource_manager::roundup_scaled_allocations(std::map<std::size_t, static_allocation_data> &scaled_static_allocation_data , std::size_t total_allocated)
+        {
+
+        }
+
+
+        void resource_manager::preprocess_static_allocation()
+        {
+            proxies_map_type::iterator it;
+            static_allocation_data.clear();
+
+            for (it == proxies_.begin();it!=proxies_.end();it++)
+            { 
+                proxy_data& p = (*it).second;
+                boost::shared_ptr<detail::manage_executor> proxy = p.proxy_;
+                static_allocation_data st;
+                st.proxy_ = proxy;
+
+                // ask executor for its policies
+                error_code ec1(lightweight);
+                st.min_proxy_cores = proxy->get_policy_element(detail::min_concurrency, ec1);
+                if (ec1) st.min_proxy_cores = 1;
+                st.max_proxy_cores = proxy->get_policy_element(detail::max_concurrency, ec1);
+                if (ec1) st.max_proxy_cores = get_os_thread_count();
+
+                st.num_borrowed_cores = 0;
+                st.num_owned_cores = 0;
+
+
+                for (coreids_type coreids : p.core_ids_)
+                {
+                    if (punits_[coreids.first].use_count_ > 1)
+                        st.num_borrowed_cores++;
+                    if (punits_[coreids.first].use_count_ == 1)
+                        st.num_owned_cores++;
+                }
+
+                static_allocation_data.insert(std::map<std::size_t, 
+                        static_allocation_data>::value_type((*it).first , st));
+            }
+
+        }
+
+
+        void resource_manager::preprocess_dynamic_allocation()
+        {
+        
+        unsigned int index = 0;
+/*        SchedulerProxy * pSchedulerProxy = NULL;
+
+
+        for (pSchedulerProxy = m_schedulers.First(); pSchedulerProxy != NULL; pSchedulerProxy = m_schedulers.Next(pSchedulerProxy))
+        {
+            DynamicAllocationData * pDynamicData = pSchedulerProxy->GetDynamicAllocationData();
+            memset(pDynamicData, 0, sizeof(DynamicAllocationData));
+
+            PopulateCommonAllocationData(index, pSchedulerProxy, pDynamicData);
+
+            // Initialize the dynamic allocation specific fields.
+            
+            pDynamicData->m_suggestedAllocation = pSchedulerProxy->GetNumAllocatedCores();
+            
+
+            // Fully loaded is used to mark schedulers that:
+            //  1) Have a non-zero number of cores (or nested thread subscriptions), but no idle cores.
+            //  2) Have a suggested allocation greater than or equal to what they currenty have.
+            //  3) Have less cores than they desire.
+            // If we have extra cores to give away or share, these schedulers could benefit from extra cores.
+            if (pSchedulerProxy->GetNumAllocatedCores() > 0)
+            {
+                pDynamicData->m_fFullyLoaded = (pDynamicData->m_numIdleCores == 0 &&
+                                                pSchedulerProxy->GetNumAllocatedCores() <= pDynamicData->m_suggestedAllocation &&
+                                                pSchedulerProxy->GetNumAllocatedCores() < pSchedulerProxy->DesiredHWThreads());
+            }
+            else
+            {
+                // Account for external thread subscriptions on a nested scheduler with min = 0
+                pDynamicData->m_fFullyLoaded = (pSchedulerProxy->GetNumNestedThreadSubscriptions() > 0 &&
+                                                pSchedulerProxy->GetNumAllocatedCores() <= pDynamicData->m_suggestedAllocation &&
+                                                pSchedulerProxy->GetNumAllocatedCores() < pSchedulerProxy->DesiredHWThreads());
+            }
+
+            
+            m_ppProxyData[index] = pDynamicData;
+            ++index;
+        }
+
+         for (unsigned int index = 0; index < m_numSchedulers; ++index)
+        {
+            DynamicAllocationData * pDynamicData = static_cast<DynamicAllocationData *>(m_ppProxyData[index]);
+            SchedulerProxy * pSchedulerProxy = pDynamicData->m_pProxy;
+            
+            if (pSchedulerProxy->GetNumBorrowedCores() > 0)
+            {
+                HandleBorrowedCores(pSchedulerProxy, pDynamicData);
+            }
+
+            
+            // If hill climbing has suggested an allocation increase for a scheduler with idle cores, or an allocation decrease that does not
+            // take away all its idle cores over the minimum, we override the suggested allocation here.
+            if (pDynamicData->m_numIdleCores > 0 &&
+                pDynamicData->m_suggestedAllocation > pSchedulerProxy->GetNumAllocatedCores() - pDynamicData->m_numIdleCores)
+            {
+                pDynamicData->m_suggestedAllocation = max(pSchedulerProxy->MinHWThreads(), pSchedulerProxy->GetNumAllocatedCores() - pDynamicData->m_numIdleCores);
+            }
+
+            // Make another pass, since the loop above could change the state of some cores, as well as the borrowed and allocated counts.
+            // Check if we can take away any owned shared cores from this scheduler. We don't want to migrate these cores, so we can minimize
+            // sharing if possible. While taking away cores, we must ensure that there are enough owned cores to satisfy MinHWThreads().
+
+            // Since we must migrate all borrowed idle cores, (we don't want to lend the underlying core to a different scheduler as part of the
+            // distribute idle cores phase), we need to take that into account while deciding how many shared owned cores we can give up, if any.
+
+            if (pDynamicData->m_suggestedAllocation < pSchedulerProxy->GetNumAllocatedCores() &&
+                pSchedulerProxy->GetNumOwnedCores() > pSchedulerProxy->MinHWThreads())
+            {
+                HandleSharedCores(pSchedulerProxy, pDynamicData);
+             }
+
+
+        }
+*/
+        }
+
+        // the resource manager is locked while executing this function
+        std::vector<std::pair<std::size_t, std::size_t> >
+            resource_manager::allocate_virt_cores(
+                    detail::manage_executor* proxy, std::size_t min_punits,
+                    std::size_t max_punits, error_code& ec)
+            {
+                std::vector<coreids_type> core_ids;
+
+                // array of available processing units
+                std::vector<BOOST_SCOPED_ENUM(punit_status)> available_punits(
+                        get_os_thread_count(), punit_status::unassigned);
+
+                // find all available processing units with zero use count
+                std::size_t reserved = reserve_processing_units(0, max_punits,
+                        available_punits);
+                if (reserved < max_punits)
+                {
+                    // insufficient available cores found, try to share 
+                    // processing units
+
+                    preprocess_static_allocation();
+
+                    reserved+=release_cores_on_existing_scedulers(release_borrowed_cores, available_punits);
+
+                    if(reserved < max_punits)
+                    {
+                        reserved += redistribute_cores_among_all(reserved, min_punits, max_punits,available_punits);
+
+                        if (reserved < min_punits)
+                        {
+                            reserved += release_cores_on_existing_scedulers(release_cores_to_min, available_punits);
+                            if (reserved < min_punits)
+                            {
+                                reserved += reserve_at_higher_use_count(min_punits - reserved , available_punits);
+                            }
+                        }
+                    }
+                }
+
+                // processing units found, inform scheduler
+                std::size_t punit = 0;
+                for (std::size_t i = 0; i != available_punits.size(); ++i)
+                {
+                    if (available_punits[i] == punit_status::reserved) //-V104
+                    {
+                        proxy->add_processing_unit(punit, i, ec);
+                        if (ec) break;
+
+                        core_ids.push_back(std::make_pair(i, punit));
+                        ++punit;
+
+                        // update use count for reserved processing units
+                        ++punits_[i].use_count_;
+
+                    }
+
+                }
+                HPX_ASSERT(punit <= max_punits);
+
+                if (ec) {
+                    // on error, remove the already assigned virtual cores
+                    for (std::size_t j = 0; j != punit; ++j)
+                    {
+                        proxy->remove_processing_unit(j, ec);
+                        --punits_[j].use_count_;
+                    }
+
+                    return std::vector<coreids_type>();
+
+                }
+
+                if (&ec != &throws)
+                    ec = make_success_code();
+                return core_ids;
+            }
+
+
+        // Stop the executor identified with the given cookie
+        void resource_manager::stop_executor(std::size_t cookie, error_code& ec)
+        {
+            boost::lock_guard<mutex_type> l(mtx_);
+            proxies_map_type::iterator it = proxies_.find(cookie);
+            if (it == proxies_.end()) {
+                HPX_THROWS_IF(ec, bad_parameter, "resource_manager::detach",
+                        "the given cookie is not known to the resource manager");
+                return;
+            }
+
+            // inform executor to give up virtual cores
+            proxy_data& p = (*it).second;
+            for (coreids_type coreids : p.core_ids_)
+            {
+                p.proxy_->remove_processing_unit(coreids.second, ec);
+            }
+        }
+
+        // Detach the executor identified with the given cookie
+        void resource_manager::detach(std::size_t cookie, error_code& ec)
+        {
+            boost::lock_guard<mutex_type> l(mtx_);
+            proxies_map_type::iterator it = proxies_.find(cookie);
+            if (it == proxies_.end()) {
+                HPX_THROWS_IF(ec, bad_parameter, "resource_manager::detach",
+                        "the given cookie is not known to the resource manager");
+                return;
+            }
+
+            // adjust resource usage count
+            proxy_data& p = (*it).second;
+            for (coreids_type coreids : p.core_ids_)
+            {
+                HPX_ASSERT(punits_[coreids.first].use_count_ != 0);
+                --punits_[coreids.first].use_count_;
+            }
+
+            proxies_.erase(cookie);
+        }
+    }}
